@@ -1,0 +1,413 @@
+<!--
+    HAR Extractor 0.10.0
+    Copyright (C) 2021-2022, Jason Cipriani <jason.cipriani.dev ~ gmail.com>
+    Copyright (C) 2024-2024, Pascal Wagler
+    HAR Extractpr home page: https://www.github.com/Wandmalfarbe/har-extractor
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+    
+    --------------------------------------------------------------------------
+    
+    HAR Extractor uses the library JSZip 3.7.1 released under the GPLv3 license.
+    JSZip Copyright (C) 2009-2016 Stuart Knightley
+    JSZip home page: https://stuk.github.io/jszip/
+    JSZip license: https://github.com/Stuk/jszip/blob/v3.7.1/LICENSE.markdown
+-->
+<!DOCTYPE html>
+<html lang="en" class="h-100">
+<head>
+    <script>const HAR_EXTRACTOR_VERSION = '0.10.0';</script>
+    <title>HAR Extractor</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-EVSTQN3/azprG1Anm3QDgpJLIm9Nao0Yz1ztcQTwFspd3yD65VohhpuuCOmLASjC" crossorigin="anonymous">
+    <style>
+        .closed .ifopen {
+            display: none;
+        }
+
+        .open .ifclosed {
+            display: none;
+        }
+
+        .zipidle .ifzipbusy {
+            display: none;
+        }
+
+        .zipbusy .ifzipidle {
+            display: none;
+        }
+
+        .hidden {
+            display: none;
+        }
+    </style>
+    <script>
+        let loaded = {};
+
+        function alertError(context, e) {
+            //let details = JSON.stringify(e, Object.getOwnPropertyNames(e), 2);
+            //alert(`Error ${context}: ${e}\n\nDetails:\n\n${details}`);
+            // that's an ugly dialog just do this instead:
+            let summary = `Error ${context}: ${e.message}`;
+            console.log(`harextractor: ${summary}`);
+            console.log(e);
+            alert(`${summary}\n\nSee console for details.`);
+        }
+
+        function uiSetDocState(isopen) {
+            document.body.classList.remove(isopen ? 'closed' : 'open');
+            document.body.classList.add(isopen ? 'open' : 'closed');
+        }
+
+        function uiSetZipState(isbusy) {
+            document.body.classList.remove(isbusy ? 'zipidle' : 'zipbusy');
+            document.body.classList.add(isbusy ? 'zipbusy' : 'zipidle');
+        }
+
+        function clearUI() {
+            loaded = {};
+            uiSetDocState(false);
+            uiSetZipState(false);
+            document.querySelectorAll(".clearme").forEach((el) => el.innerHTML = '');
+        }
+
+        function strCompare(a, b) {
+            return a.toLocaleLowerCase().localeCompare(b.toLocaleLowerCase());
+        }
+
+        function loadFailed(e) {
+            clearUI();
+            alertError('loading file', e);
+        }
+
+        function openHAR(input) {
+            clearUI();
+            if (!input.files || !input.files.length) {
+                alert('No file selected.');
+            } else {
+                loaded.filename = input.files[0].name;
+                domSetText('harfilename', loaded.filename);
+                let reader = new FileReader();
+                reader.onload = (e) => loadHARText(e.target.result);
+                reader.onerror = (e) => loadFailed(reader.error);
+                reader.readAsText(input.files[0]);
+            }
+        }
+
+        function loadHARText(text) {
+            try {
+                loadHARJSON(JSON.parse(text));
+            } catch (e) {
+                loadFailed(e);
+            }
+        }
+
+        function loadHARJSON(har) {
+
+            // extract and parse interesting entries
+            let harents = [];
+            let commonpath = null;
+            for ([id, ent] of har.log.entries.entries()) {
+                let harent = {id: id};
+                let fullpath = new URL(ent.request.url).pathname.split('/');
+                harent.name = fullpath.pop();
+                harent.type = ent.response.content.mimeType;
+                harent.size = ent.response.content.size;
+                harent.pathcomps = fullpath; // .path string will be set below
+                harent.encoding = ent.response.content.hasOwnProperty("encoding") ? ent.response.content.encoding : "";
+                if (!ent.response.content.text) {
+                    harent.error = 'No content.';
+                } else if (!ent.response.content.hasOwnProperty("encoding")) {
+
+                } else if (ent.response.content.encoding !== 'base64') {
+                    harent.error = "Can't decode encoding " + ent.response.content.encoding;
+                }
+
+                commonpath = fullpath.slice(0, [...fullpath, null].findIndex((p, n) => p !== (commonpath || fullpath)[n])); // ;)
+                harents.push(harent); // note: we can now guarantee that if harents has items, commonpath is set.
+            }
+
+            harents.forEach(ent => ent.path = ent.pathcomps.slice(commonpath.length).join('/'));
+
+            let entsort = function (a, b) {
+                let p = strCompare(a.path, b.path);
+                return (p !== 0) ? p : strCompare(a.name, b.name);
+            }
+
+            harents.sort(entsort);
+
+            loaded.data = har.log.entries;
+            loaded.entries = harents;
+
+            // ui stuff from here down
+
+            domSetText('fileinfo_fversion', har.log.version);
+            domSetText('fileinfo_creator', har.log.creator.name);
+            domSetText('fileinfo_cversion', har.log.creator.version);
+            domSetText('fileinfo_npages', har.log.pages.length);
+            domSetText('fileinfo_nentries', har.log.entries.length);
+
+            let makenamelink = function (ent) {
+                let a = document.createElement("a");
+                let enc = har.log.entries[ent.id].response.content.encoding;
+                let data = har.log.entries[ent.id].response.content.text;
+                a.href = `data:${ent.type};${enc},${data}`;
+                a.target = '_blank';
+                a.download = ent.name;
+                a.innerText = ent.name;
+                return a;
+            }
+
+            populateTable('entryinfo', harents, [
+                {name: 'ID', value: (e) => e.id},
+                {name: 'Filename', value: makenamelink},
+                {name: 'Type', value: (e) => e.type},
+                {name: 'Encoding', value: (e) => e.encoding},
+                {name: 'Size', value: (e) => e.size},
+                {name: 'Path', value: (e) => e.path},
+                {name: 'Error', value: (e) => e.error},
+            ]);
+            uiSetDocState(true);
+        }
+
+        function populateTable(tableid, items, fields) {
+
+            let ebody;
+            {
+                let etable = document.getElementById(tableid);
+                etable.innerHTML = '';
+                let header = etable.createTHead().insertRow();
+                for (field of fields)
+                    domAppendTH(header).innerText = field.name;
+                ebody = etable.createTBody();
+            }
+
+            for (ent of items) {
+                let erow = ebody.insertRow();
+                for (field of fields) {
+                    let value = field.value(ent);
+
+                    if (value instanceof Node) {
+                        erow.insertCell().appendChild(value);
+                    } else {
+                        if (value !== undefined) {
+                            erow.insertCell().innerText = value;
+                        } else {
+                            erow.insertCell().innerText = "";
+                        }
+                    }
+                }
+            }
+
+        }
+
+        function buildZIP(ents, data) {
+            if (ents.length === 0) {
+                throw new Error('There are no files to save.');
+            }
+            console.log(`harextractor: generating archive with ${ents.length} file(s)...`);
+            let zip = new JSZip();
+            for (ent of ents) {
+                console.log(`harextractor: adding ${ent.name} (${ent.id})...`);
+                try {
+                    let filepath = `${ent.path}/${ent.name}`;
+                    if (filepath.startsWith('/'))
+                        filepath = filepath.substring(1);
+                    let isBase64 = data[ent.id].response.content.hasOwnProperty("encoding") && data[ent.id].response.content.encoding === "base64";
+                    zip.file(filepath, data[ent.id].response.content.text, {base64: isBase64});
+                } catch (e) {
+                    console.log(e);
+                }
+            }
+            console.log('harextractor: archive ready.');
+            return zip;
+        }
+
+        function showZipProgress(m) {
+            domSetText('zipprogress', m.percent.toFixed(0));
+        }
+
+        function saveZIP() {
+            try {
+                if (!loaded.entries)
+                    throw new Error('No file loaded.');
+                uiSetZipState(true);
+                if (!loaded.zip)
+                    loaded.zip = buildZIP(loaded.entries, loaded.data);
+                let comp = parseInt(document.getElementById('compression').value);
+                loaded.zip.generateAsync({
+                    type: 'blob',
+                    compression: (comp > 0 ? 'DEFLATE' : 'STORE'),
+                    compressionOptions: {level: comp}
+                }, showZipProgress).then(function (zipblob) {
+                    let zipurl = URL.createObjectURL(zipblob);
+                    let kludge = document.createElement('a');
+                    kludge.href = zipurl;
+                    kludge.target = '_blank';
+                    kludge.download = `${loaded.filename}.zip`;
+                    kludge.innerText = kludge.download;
+                    kludge.click();
+                    kludge.remove();
+                    URL.revokeObjectURL(zipurl);
+                }).finally(function () {
+                    uiSetZipState(false);
+                });
+            } catch (e) {
+                uiSetZipState(false);
+                alertError('saving ZIP', e);
+            }
+        }
+
+        // i'd really like this to stay self-contained and offline, so i'm rolling my own
+        // dom utility functions instead of using e.g. jquery.
+        function domSetText(id, text) {
+            document.querySelector(`#${id}`).innerText = text;
+        }
+
+        function domAppendTH(header) {
+            // todo: shouldn't there be table api for this? insertCell only adds td's.
+            let th = document.createElement('th');
+            return header.appendChild(th);
+        }
+
+        document.addEventListener('DOMContentLoaded', () => document.getElementById('version').innerText = HAR_EXTRACTOR_VERSION);
+    </script>
+</head>
+<body class="closed zipidle d-flex flex-column h-100">
+
+<nav class="navbar navbar-expand-lg navbar-light bg-light">
+    <div class="container">
+        <a class="navbar-brand" href="#">HAR Extractor</a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="navbarNav">
+            <ul class="navbar-nav ms-auto">
+                <li class="nav-item">
+                    <a class="nav-link disabled" href="#" tabindex="-1" aria-disabled="true">Version <span id="version"></span></a>
+                </li>
+                <li class="nav-item">
+                    <a class="nav-link active" aria-current="page" href="https://www.github.com/Wandmalfarbe/har-extractor/issues">Feedback</a>
+                </li>
+            </ul>
+        </div>
+    </div>
+</nav>
+
+<!-- Begin page content -->
+<main class="flex-shrink-0 p-3">
+
+    <div class="container">
+        <div class="row">
+            <div class="col">
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">File Upload</h5>
+
+                        <h6 class="card-subtitle mb-2 text-muted">Upload a <code>.har</code> file or a JSON file.</h6>
+
+                        <input type="file" accept=".har,application/json" onclick="this.value=null" class="hidden" onchange="openHAR(this)" id="harfileinput">
+                        <label class="ifzipidle form-label" for="harfileinput">
+                            <button class="btn btn-primary" onclick="this.parentElement.click()">Choose File...</button>
+                            <span class="clearme ms-2" id="harfilename"></span>
+                        </label>
+                        <label class="ifzipbusy">
+                            <button class="btn" disabled>Choose File...</button><!-- hack to "disable" button without having to code stuff -->
+                        </label>
+                    </div>
+                </div>
+            </div>
+            <div class="col ifopen">
+
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">ZIP Download</h5>
+                        <h6 class="card-subtitle mb-2 text-muted">Download all HAR contents as a single ZIP file.</h6>
+
+                        <!-- if zip idle-->
+                        <div class="ifzipidle">
+                            <label class="form-label" for="compression">Compression</label>
+
+                            <select class="form-select" id="compression">
+                                <option value="0">None - Fastest</option>
+                                <option value="1">1 - Fast</option>
+                                <option value="2">2</option>
+                                <option value="3">3</option>
+                                <option value="4">4</option>
+                                <option value="5" selected>5 - Normal</option>
+                                <option value="6">6</option>
+                                <option value="7">7</option>
+                                <option value="8">8</option>
+                                <option value="9">9 - Best</option>
+                            </select>
+                            <button class="btn btn-secondary mt-3" onclick="saveZIP()" id="savezip">Save ZIP</button>
+                        </div>
+                        <!-- if zip in progress-->
+                        <div class="ifzipbusy">
+                            <p>Please wait... <span id="zipprogress">0</span>%</p>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <div class="container ifopen pt-3">
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">General Metadata</h5>
+                <table class="table table-sm table-striped">
+                    <tr>
+                        <td>HAR Version</td>
+                        <td><span id="fileinfo_fversion" class="clearme"></span></td>
+                    <tr>
+                        <td>Creator</td>
+                        <td><span id="fileinfo_creator" class="clearme"></span></td>
+                    <tr>
+                        <td>Creator Version</td>
+                        <td><span id="fileinfo_cversion" class="clearme"></span></td>
+                    <tr>
+                        <td>Page Count</td>
+                        <td><span id="fileinfo_npages" class="clearme"></span></td>
+                    <tr>
+                        <td>Entry Count</td>
+                        <td><span id="fileinfo_nentries" class="clearme"></span></td>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="container ifopen pt-3">
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">Entries</h5>
+                <table class="table table-sm table-striped" id="entryinfo"></table>
+            </div>
+        </div>
+    </div>
+</main>
+
+<footer class="footer mt-auto py-3 bg-light">
+    <div class="container text-muted fs-6">
+        <div>
+            HAR Extractor Copyright &copy; 2021-2022, Jason Cipriani; Copyright (C) 2024-2024, Pascal Wagler
+            | <a href="https://www.github.com/Wandmalfarbe/har-extractor/blob/master/LICENSE">GPL-3.0</a>
+            | <a href="https://www.github.com/Wandmalfarbe/har-extractor">GitHub</a>
+        </div>
+    </div>
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.7.1/jszip.min.js" integrity="sha512-xQBQYt9UcgblF6aCMrwU1NkVA7HCXaSN2oq0so80KO+y68M+n64FOcqgav4igHe6D5ObBLIf68DWv+gfBowczg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+</body>
+</html>
